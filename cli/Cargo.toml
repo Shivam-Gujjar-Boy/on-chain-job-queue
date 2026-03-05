@@ -1,0 +1,21 @@
+[package]
+name = "jq-cli"
+version = "0.1.0"
+description = "CLI client for the on-chain job queue"
+edition = "2021"
+
+[workspace]
+
+[[bin]]
+name = "jq-cli"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+solana-sdk = "2.3"
+solana-client = "2.3"
+borsh = "1"
+sha2 = "0.10"
+bs58 = "0.5"
+anyhow = "1"
+serde_json = "1"
