@@ -279,7 +279,7 @@ on-chain-job-queue/
 
 ```bash
 # Clone the repo
-git clone https://github.com/YOUR_USERNAME/on-chain-job-queue.git
+git clone https://github.com/Shivam-Gujjar-Boy/on-chain-job-queue.git
 cd on-chain-job-queue
 
 # Build the Solana program
