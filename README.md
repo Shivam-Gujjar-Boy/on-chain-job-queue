@@ -14,6 +14,11 @@ A production-grade **distributed job queue** system rebuilt as a Solana on-chain
 - [How This Works in Web2](#how-this-works-in-web2)
 - [How This Works on Solana](#how-this-works-on-solana)
 - [Architecture & Account Model](#architecture--account-model)
+  - [PDA Hierarchy](#pda-hierarchy)
+  - [Account Sizes](#account-sizes)
+  - [Sharded Bucket Architecture](#sharded-bucket-architecture)
+  - [Job State Machine](#job-state-machine)
+  - [Anchor Events](#anchor-events)
 - [Tradeoffs & Constraints](#tradeoffs--constraints)
 - [Program Instructions](#program-instructions)
 - [Project Structure](#project-structure)
@@ -36,8 +41,18 @@ This system allows **any company/entity** to create their own job queue on-chain
 - **Heartbeat-based timeout detection** — workers must heartbeat or jobs become reclaimable via a permissionless crank
 - **Priority scheduling** — jobs carry a priority byte (0–255) for priority-aware worker processing
 - **Off-chain data references** — only SHA-256 hashes stored on-chain; raw data stays off-chain
-- **Event emission** — all state transitions emit Anchor events for off-chain indexing
+- **11 Anchor events** — every state transition emits a typed event for off-chain indexing
 - **Role-based access control** — authority-only queue management, registered-worker-only claiming/completing
+
+### What Makes This Stand Out
+
+| Feature | Notes |
+|---------|-------|
+| **Sharded buckets** | Eliminates write-lock contention between workers entirely — no single queue head account |
+| **Permissionless crank** | Timeout resolution requires no trusted scheduler; any account can call `timeout_job` |
+| **Deterministic PDAs** | Every account is re-derivable from public inputs — zero reliance on off-chain indexers for basic operation |
+| **Event-driven indexing** | All 11 lifecycle transitions emit structured Anchor events; downstream indexers need no account polling |
+| **Full lifecycle CLI** | `jq-cli` covers every instruction; `jq-sim` TUI runs a realistic multi-client / multi-worker simulation on localnet |
 
 ---
 
@@ -129,6 +144,19 @@ Queue PDA (per queue instance)
     └── Stores: stats, active flag, queue reference
 ```
 
+### Account Sizes
+
+All accounts use Anchor's `#[derive(InitSpace)]` for precise compile-time space calculation:
+
+| Account | Data (bytes) | Total incl. discriminator | Key Fields |
+|---------|:------------:|:-------------------------:|------------|
+| `Queue` | 130 | **138** | authority, name (≤32), counters, config flags |
+| `Job` | 210 | **218** | status, hashes (2×32B), timestamps, retry counter |
+| `Worker` | 98 | **106** | queue ref, authority, stats counters |
+| `Bucket` | 38 | **46** | queue ref, bucket_index, pending_count |
+
+Keeping `Job` at 218 bytes was a deliberate design decision — storing only the 32-byte SHA-256 hash of the payload (not the payload itself) keeps each job account rent-exempt for **~0.002 SOL**, making even high-volume queues economical.
+
 ### Sharded Bucket Architecture
 
 To prevent worker contention (a critical scaling issue), jobs are distributed across **sharded buckets** using `job_id % num_buckets`:
@@ -171,6 +199,26 @@ Workers targeting different buckets never contend on the same account, enabling 
      └──────────────────────────────│ TIMEDOUT │ (permanent)
                                     └──────────┘
 ```
+
+### Anchor Events
+
+Every state transition emits a typed Anchor event, enabling off-chain indexers (or a Geyser plugin) to build a complete job history without polling accounts:
+
+| Event | Fired When |
+|-------|-----------|
+| `QueueCreated` | Queue PDA initialized |
+| `QueueUpdated` | Config changed by authority |
+| `BucketInitialized` | A shard bucket is created |
+| `WorkerRegistered` | New worker PDA created |
+| `WorkerDeregistered` | Worker set inactive |
+| `JobSubmitted` | Job enters Pending state |
+| `JobClaimed` | Job transitions to Assigned |
+| `HeartbeatReceived` | Worker keep-alive recorded |
+| `JobCompleted` | Job reaches terminal Completed state |
+| `JobFailed` | Job fails (retry queued or permanent) |
+| `JobTimedOut` | Crank triggered timeout resolution |
+
+Events carry full context (queue pubkey, job_id, worker, timestamps) so a subscriber needs no additional RPC calls to reconstruct state.
 
 ---
 
@@ -256,6 +304,8 @@ on-chain-job-queue/
 │           ├── config.rs       # Interactive simulation config
 │           ├── chain.rs        # On-chain instruction adapter
 │           ├── engine.rs       # Client/worker/cranker runtime
+│           ├── types.rs        # Shared snapshot state types
+│           ├── report.rs       # Post-run result export (txt + json)
 │           └── ui.rs           # Real-time ratatui dashboard
 ├── tests/
 │   └── job-queue.ts            # 25 comprehensive TypeScript tests
@@ -550,6 +600,11 @@ Program deployed and fully operational on Solana Devnet:
 | **Claim Job #0** | [2BvGwZthnhBvbn8v1KHsiZQHqDiLLSPLnLx26yoZQQVXfsGLavtdpFefBcnom4ENBXWqpPn2osv9dyHhtJW3ASzq](https://explorer.solana.com/tx/2BvGwZthnhBvbn8v1KHsiZQHqDiLLSPLnLx26yoZQQVXfsGLavtdpFefBcnom4ENBXWqpPn2osv9dyHhtJW3ASzq?cluster=devnet) |
 | **Heartbeat** | [3pwnwHXr3EiUESWwtr9Yx1avRoy4pirFWWzPQh6Riqsf6RHXrs27HRBcYH98jPSh3MAq8Xod6RodpSjEU7cpd5cU](https://explorer.solana.com/tx/3pwnwHXr3EiUESWwtr9Yx1avRoy4pirFWWzPQh6Riqsf6RHXrs27HRBcYH98jPSh3MAq8Xod6RodpSjEU7cpd5cU?cluster=devnet) |
 | **Complete Job #0** | [3EJqcdYbuQbNJi6sA814KyvecDEMRBANWsEYD6izF4gjDehKsQAAVVkMydF1iXqqpzHdFqPaiwi42ZVFy1mkDxQ5](https://explorer.solana.com/tx/3EJqcdYbuQbNJi6sA814KyvecDEMRBANWsEYD6izF4gjDehKsQAAVVkMydF1iXqqpzHdFqPaiwi42ZVFy1mkDxQ5?cluster=devnet) |
+| **Submit Job #3** | [2FbVfr1xHgEVe1GuaG9Hu7jJzpbyymgQTydth2mpYwBmFyC1rdyigYbUDzHcA87jPbtH9U2rTDy2awk4C6Ed7o7a](https://explorer.solana.com/tx/2FbVfr1xHgEVe1GuaG9Hu7jJzpbyymgQTydth2mpYwBmFyC1rdyigYbUDzHcA87jPbtH9U2rTDy2awk4C6Ed7o7a?cluster=devnet) |
+| **Claim Job #3** | [8eUhznQqXunTHFYeFZ8PEYDbkjcvy4QCznJVpDLGCe6HrBdCpfACckir9LFGQjutwkY5eoLcSmj798rRiKDMHVM](https://explorer.solana.com/tx/8eUhznQqXunTHFYeFZ8PEYDbkjcvy4QCznJVpDLGCe6HrBdCpfACckir9LFGQjutwkY5eoLcSmj798rRiKDMHVM?cluster=devnet) |
+| **Fail Job #3** *(retry queued)* | [2FSJX6gVXA6xvv9Yxj5i8vGfj7gvJoFjT4YVPUqsGnk2krG6g6gnniAgmr9twJZ2jc2VE3pP9PRatmskaTYXUJF4](https://explorer.solana.com/tx/2FSJX6gVXA6xvv9Yxj5i8vGfj7gvJoFjT4YVPUqsGnk2krG6g6gnniAgmr9twJZ2jc2VE3pP9PRatmskaTYXUJF4?cluster=devnet) |
+| **Claim Job #4** *(for timeout demo)* | [meVhq1Qy4wcvxYiM7E8rruaF5gmBsN67w284jMMJUGtndLJirG2cct9QSqUjarSxmUEgrz5QdaeU1mfo5Gvo1rF](https://explorer.solana.com/tx/meVhq1Qy4wcvxYiM7E8rruaF5gmBsN67w284jMMJUGtndLJirG2cct9QSqUjarSxmUEgrz5QdaeU1mfo5Gvo1rF?cluster=devnet) |
+| **Timeout Job #4** *(permissionless crank)* | [284iZD118Z4tf59dE37odV2HCCBt7nU5CAGBu1yLqGjn32WcRMDm8r8xFZuddL95fdzxiM2AGk9F9C5tBbx6G4h5](https://explorer.solana.com/tx/284iZD118Z4tf59dE37odV2HCCBt7nU5CAGBu1yLqGjn32WcRMDm8r8xFZuddL95fdzxiM2AGk9F9C5tBbx6G4h5?cluster=devnet) |
 
 **Live Queue Account:** [G5mipxEvGxzfa3Yj7V5uFHUKhZT1jgTSZVbmknxEChxg](https://explorer.solana.com/address/G5mipxEvGxzfa3Yj7V5uFHUKhZT1jgTSZVbmknxEChxg?cluster=devnet)
 
