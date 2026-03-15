@@ -2,8 +2,10 @@
 node_modules/
 
 # Anchor / Solana build artifacts
-.anchor/
+.anchor
 target/
+test-ledger/
+results/
 
 # Rust
 debug/

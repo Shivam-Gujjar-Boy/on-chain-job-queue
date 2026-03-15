@@ -19,6 +19,7 @@ A production-grade **distributed job queue** system rebuilt as a Solana on-chain
 - [Project Structure](#project-structure)
 - [Getting Started](#getting-started)
 - [CLI Client Usage](#cli-client-usage)
+- [Localnet Simulation TUI](#localnet-simulation-tui)
 - [Testing](#testing)
 - [Devnet Transaction Links](#devnet-transaction-links)
 - [Design Decisions](#design-decisions)
@@ -247,8 +248,15 @@ on-chain-job-queue/
 │       │   └── timeout_job.rs
 │       ├── errors.rs           # Custom error codes
 │       └── events.rs           # Anchor events for indexing
-├── cli/                        # Rust CLI client
-│   └── src/main.rs             # Full CLI with all commands
+├── cli/                        # Rust clients
+│   └── src/
+│       ├── main.rs             # Manual command CLI (jq-cli)
+│       ├── sim_main.rs         # Localnet simulator + TUI (jq-sim)
+│       └── sim/                # Modular simulator internals
+│           ├── config.rs       # Interactive simulation config
+│           ├── chain.rs        # On-chain instruction adapter
+│           ├── engine.rs       # Client/worker/cranker runtime
+│           └── ui.rs           # Real-time ratatui dashboard
 ├── tests/
 │   └── job-queue.ts            # 25 comprehensive TypeScript tests
 ├── Anchor.toml
@@ -308,6 +316,7 @@ This spins up a local validator, deploys the program, and runs all 25 tests cove
 cd cli
 cargo build --release
 # Binary at: cli/target/release/jq-cli
+# Simulator at: cli/target/release/jq-sim
 ```
 
 ---
@@ -393,6 +402,84 @@ jq-cli worker-status --queue <QUEUE_ADDRESS> --worker <WORKER_PUBKEY>
 ```bash
 jq-cli timeout-job --queue <QUEUE_ADDRESS> --job-id 5
 ```
+
+---
+
+## Localnet Simulation TUI
+
+This project includes a dedicated **localnet simulation runtime + terminal dashboard** (`jq-sim`) for realistic, repeatable verification without devnet rate-limit noise.
+
+### What the Simulator Models
+
+- **Client agents** (producers): probabilistically submit jobs at a configurable rate
+- **Worker agents** (consumers): claim jobs, heartbeat during processing, then complete/fail/stall based on configured probabilities
+- **Cranker loop**: scans assigned jobs and triggers `timeout_job` when heartbeat timeout is exceeded
+- **On-chain truth**: all state transitions are real program instructions on localnet (not mocked)
+
+### Run a Local Simulation (Step-by-Step)
+
+1. Start local validator:
+
+```bash
+solana-test-validator -r
+```
+
+2. Point Solana CLI to localnet and fund payer:
+
+```bash
+solana config set --url http://127.0.0.1:8899
+solana airdrop 50 $(solana address) --url http://127.0.0.1:8899
+```
+
+3. Deploy the program to localnet:
+
+```bash
+anchor deploy --provider.cluster localnet
+```
+
+4. Build and run simulator:
+
+```bash
+cd cli
+cargo build --release --bin jq-sim
+./target/release/jq-sim --rpc-url http://127.0.0.1:8899
+```
+
+The simulator asks for scenario inputs (queues, clients, workers, runtime, probabilities, heartbeat interval, etc.) and then starts the live dashboard.
+
+### TUI Dashboard
+
+The dashboard shows, in real time:
+
+- queue-level submitted/claimed/completed/failed/timeout counters
+- on-chain queue counters (pending, active, completed, failed)
+- per-worker throughput, heartbeat counts, stalls, and tx errors
+- overall transaction success/failure totals and event log
+
+Control keys:
+
+- `q` or `Esc`: stop simulation
+
+### Simulation Result Files
+
+After each completed run, simulator exports two files in `results/`:
+
+- `sim-run-<timestamp>.txt` — human-readable summary
+- `sim-run-<timestamp>.json` — structured machine-readable report
+
+### Important: Expected Contention Errors
+
+Under high concurrent producers, you may see intermittent submit failures like:
+
+- `custom program error: 0x7d6`
+
+This is expected PDA seed contention: multiple clients may derive the same `job` PDA using the same `queue.total_jobs_created` snapshot, and only one transaction wins. This behavior is normal for optimistic concurrent submission on shared state and is useful to demonstrate realistic race conditions in distributed systems.
+
+### Why This Helps Verification
+
+- Reproduces realistic multi-client, multi-worker behavior with deterministic configuration
+- Exercises full on-chain lifecycle paths (submit/claim/heartbeat/complete/fail/timeout)
+- Produces auditable run artifacts (`results/*.txt`, `results/*.json`) for reviewers
 
 ---
 
@@ -489,5 +576,4 @@ While the bounty allows raw SDK, Anchor provides: automatic (de)serialization, a
 
 ## License
 
-MIT
-A Dsitributed On-chain Job Queue inspired by BullMQ
+Apache-2.0. See [LICENSE](LICENSE).

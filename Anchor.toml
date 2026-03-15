@@ -14,7 +14,7 @@ job_queue = "5MSKMK96xy7rVkXYAgBPZmZfwRkvehe8P94qvVHhCSP1"
 url = "https://api.apr.dev"
 
 [provider]
-cluster = "localnet"
+cluster = "devnet"
 wallet = "/home/gujjar/.config/solana/id.json"
 
 [scripts]
